@@ -11,6 +11,7 @@ import numpy as np
 from softMaxRegression import softMaxRegression
 from DenoiseAE import DenoiseAE
 from SparseAE import SparseAE
+from StackedAE import StackedAE
 
 from PIL import Image
 
@@ -52,24 +53,33 @@ if __name__ == '__main__':
     datasets = load_data()
     rng = np.random.RandomState(123)
     theano_rng = RandomStreams(rng.randint(2 ** 30))
-    #da = DenoiseAE(numpy_rng = rng, theano_rng = theano_rng, input = datasets[0][0])
-    #da.fit()
-    sa = SparseAE(numpy_rng = rng, theano_rng = theano_rng, input = datasets[0][0])
-    sa.fit()
+    #da = DenoiseAE(numpy_rng = rng, theano_rng = theano_rng)
+    #da.fit(datasets[0][0])
+    #sa = SparseAE(numpy_rng = rng, theano_rng = theano_rng)
+    #sa.fit(datasets[0][0])
+    hidden_layers_sizes = [500, 200]
+    sta = StackedAE(numpy_rng = rng, theano_rng = theano_rng, n_ins=28 * 28,
+        hidden_layers_sizes=hidden_layers_sizes, n_outs=10, mode = 'sA')
+    sta.fit(datasets)
+    print sta.ae_layers
 
     processed_data = []
     for i in range(3):
         _in = []
-        _in.append(theano.shared(T.nnet.sigmoid(T.dot(datasets[i][0], sa.W) + sa.b).eval()))
+        val = datasets[i][0]
+        for a in sta.ae_layers:
+            val = T.nnet.sigmoid(T.dot(val, a.W)+a.b)
+        _in.append(theano.shared(val.eval()))
         _in.append(datasets[i][1])
         processed_data.append(_in)
     print datasets[0][0].get_value(borrow=True).shape
     print processed_data[0][0].get_value(borrow=True).shape
-    softMaxRegression.sgd_optimization_mnist(datasets = processed_data, n_in = 500)
+    softMaxRegression.sgd_optimization_mnist(datasets = processed_data,
+                    n_in = processed_data[0][0].get_value(borrow=True).shape[1])
 
 
 '''plot'''
-'''
+
 def scale_to_unit_interval(ndar, eps=1e-8):
   """ Scales all values in the ndarray ndar to be between 0 and 1 """
   ndar = ndar.copy()
@@ -182,8 +192,10 @@ def tile_raster_images(X, img_shape, tile_shape, tile_spacing=(0, 0),
                       = this_img * (255 if output_pixel_vals else 1)
       return out_array
 
-image = Image.fromarray(tile_raster_images(X=sa.W.get_value(borrow=True).T,
+for a in sta.ae_layers:
+    size_in = a.W.get_value(borrow=True).shape[0]
+    size_out = a.W.get_value(borrow=True).shape[1]
+    image = Image.fromarray(tile_raster_images(X=a.W.get_value(borrow=True).T,
                                     img_shape=(28, 28), tile_shape=(10, 10),
                                     tile_spacing=(1, 1)))
 image.save('filters_corruption_30.png')
-'''

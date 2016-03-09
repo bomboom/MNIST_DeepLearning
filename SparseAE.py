@@ -7,7 +7,7 @@ import numpy as np
 
 class SparseAE:
     def __init__(self, numpy_rng, theano_rng, input = None, n_visible = 28 * 28,
-                n_hidden = 500, W = None, bhid = None, bvis = None, rho = 0.05):
+                n_hidden = 500, W = None, bhid = None, bvis = None):
         '''
         when weights are shared between
         the dA and an MLP layer. When dealing with SdAs this always happens,
@@ -70,14 +70,12 @@ class SparseAE:
         self.b_prime = bvis
         self.W_prime = self.W.T
         self.theano_rng = theano_rng
-        self.rho = rho
         if input is None:
             # we use a matrix because we expect a minibatch of several
             # examples, each example being a row
-            self.data = T.dmatrix(name='input')
             self.x = T.dmatrix(name = 'input')
         else:
-            self.data = input
+            self.x = input
 
         self.params = [self.W, self.b, self.b_prime]
 
@@ -90,8 +88,8 @@ class SparseAE:
     def kl_divergence(self, p, p_hat):
         return p * T.log(p) - T.log(p_hat) + (1 - p) * T.log(1 - p) - (1 - p) * T.log(1 - p_hat)
 
-    def sparsity_penalty(self, h, sparse_beta = 0.001):
-        sparsity_level = T.extra_ops.repeat(self.rho, self.n_hidden)
+    def sparsity_penalty(self, h, rho=0.05, sparse_beta = 0.001):
+        sparsity_level = T.extra_ops.repeat(rho, self.n_hidden)
         sparsity_penalty = 0
         avg_act = h.mean(axis=0)
         kl_div = self.kl_divergence(sparsity_level, avg_act)
@@ -99,12 +97,12 @@ class SparseAE:
         # Implement KL divergence here.
         return sparsity_penalty
 
-    def get_cost_update(self, sparse_beta, learning_rate):
+    def get_cost_update(self, sparse_beta, learning_rate, rho = 0.05):
         y = self.get_hidden_value(self.x)
         z = self.get_reconstructed_input(y)
 
         cost = T.mean(((self.x - z)**2).sum(axis=1))
-        sparsity_penal = self.sparsity_penalty(y, sparse_beta)
+        sparsity_penal = self.sparsity_penalty(y, rho = rho, sparse_beta = sparse_beta)
         cost = cost + sparsity_penal
 
         gparams = T.grad(cost, self.params)
@@ -112,18 +110,20 @@ class SparseAE:
                     for param, gparam in zip(self.params, gparams)]
         return cost, updates
 
-    def fit(self, sparse_beta = 0.1, learning_rate = 0.13, batch_size = 20, training_epochs = 1):
-        if not self.data:
+    def fit(self, datasets =None, rho = 0.05, sparse_beta = 0.1,
+            learning_rate = 0.13, batch_size = 20, training_epochs = 1):
+        if not datasets:
             raise Exception("data can't be empty!")
 
         index = T.lscalar()
         X = T.matrix('x')
         self.x = X
 
-        train_set_x = self.data
+        train_set_x = datasets
         n_train_batches = train_set_x.get_value(borrow = True).shape[0]// batch_size
 
-        cost, updates = self.get_cost_update(sparse_beta = sparse_beta,
+        cost, updates = self.get_cost_update(rho = rho,
+                                            sparse_beta = sparse_beta,
                                             learning_rate = learning_rate
                                             )
         train_da = theano.function(

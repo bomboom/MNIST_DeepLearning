@@ -39,11 +39,11 @@ class DenoiseAE:
         if not W:
             initial_W = np.asarray(
                 numpy_rng.uniform(
-                    low=-4 * np.sqrt(6. / (n_hidden + n_visible)),
-                    high=4 * np.sqrt(6. / (n_hidden + n_visible)),
-                    size=(n_visible, n_hidden)
+                    low = -4 * np.sqrt(6. / (n_hidden + n_visible)),
+                    high = 4 * np.sqrt(6. / (n_hidden + n_visible)),
+                    size = (n_visible, n_hidden)
                 ),
-                dtype=theano.config.floatX
+                dtype = theano.config.floatX
             )
             W = theano.shared(value=initial_W, name='W', borrow=True)
 
@@ -74,10 +74,9 @@ class DenoiseAE:
         if input is None:
             # we use a matrix because we expect a minibatch of several
             # examples, each example being a row
-            self.data = T.dmatrix(name='input')
             self.x = T.dmatrix(name = 'input')
         else:
-            self.data = input
+            self.x = input
 
         self.params = [self.W, self.b, self.b_prime]
 
@@ -105,7 +104,7 @@ class DenoiseAE:
                     for param, gparam in zip(self.params, gparams)]
         return cost, updates
 
-    def fit(self, learning_rate = 0.13, batch_size = 20, training_epochs = 1):
+    def fit(self, datasets = None, learning_rate = 0.13, batch_size = 20, training_epochs = 1):
         if not self.data:
             raise Exception("data can't be empty!")
 
@@ -113,7 +112,7 @@ class DenoiseAE:
         X = T.matrix('x')
         self.x = X
 
-        train_set_x = self.data
+        train_set_x = datasets
         n_train_batches = train_set_x.get_value(borrow = True).shape[0]// batch_size
 
         cost, updates = self.get_cost_update(corruption_level = 0.,
