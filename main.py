@@ -12,6 +12,7 @@ from softMaxRegression import softMaxRegression
 from DenoiseAE import DenoiseAE
 from SparseAE import SparseAE
 from StackedAE import StackedAE
+from LeNet import LeNet
 
 from PIL import Image
 
@@ -49,8 +50,7 @@ def load_data(dataset = 'mnist.pkl.gz'):
             (test_set_x, test_set_y)]
     return rval
 
-if __name__ == '__main__':
-    datasets = load_data()
+def runAE(datasets):
     rng = np.random.RandomState(123)
     theano_rng = RandomStreams(rng.randint(2 ** 30))
     #da = DenoiseAE(numpy_rng = rng, theano_rng = theano_rng)
@@ -77,9 +77,18 @@ if __name__ == '__main__':
     softMaxRegression.sgd_optimization_mnist(datasets = processed_data,
                     n_in = processed_data[0][0].get_value(borrow=True).shape[1])
 
+def runCNN(datasets):
+    lenet = LeNet()
+    lenet.fit(datasets)
+
+if __name__ == '__main__':
+    datasets = load_data()
+    #runAE(datasets)
+    runCNN(datasets)
+
 
 '''plot'''
-
+'''
 def scale_to_unit_interval(ndar, eps=1e-8):
   """ Scales all values in the ndarray ndar to be between 0 and 1 """
   ndar = ndar.copy()
@@ -199,3 +208,4 @@ for a in sta.ae_layers:
                                     img_shape=(28, 28), tile_shape=(10, 10),
                                     tile_spacing=(1, 1)))
 image.save('filters_corruption_30.png')
+'''

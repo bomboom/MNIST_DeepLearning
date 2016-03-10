@@ -1,5 +1,26 @@
-from __future__ import print_function
 
+"""This tutorial introduces the LeNet5 neural network architecture
+using Theano.  LeNet5 is a convolutional neural network, good for
+classifying images. This tutorial shows how to build the architecture,
+and comes with all the hyper-parameters you need to reproduce the
+paper's MNIST results.
+This implementation simplifies the model in the following ways:
+ - LeNetConvPool doesn't implement location-specific gain and bias parameters
+ - LeNetConvPool doesn't implement pooling by average, it implements pooling
+   by max.
+ - Digit classification is implemented with a logistic regression rather than
+   an RBF network
+ - LeNet5 was not fully-connected convolutions at second layer
+References:
+ - Y. LeCun, L. Bottou, Y. Bengio and P. Haffner:
+   Gradient-Based Learning Applied to Document
+   Recognition, Proceedings of the IEEE, 86(11):2278-2324, November 1998.
+   http://yann.lecun.com/exdb/publis/pdf/lecun-98.pdf
+"""
+
+from __future__ import print_function
+import cPickle as pickle
+import gzip
 import os
 import sys
 import timeit
@@ -8,214 +29,111 @@ import numpy
 
 import theano
 import theano.tensor as T
-from theano.tensor.shared_randomstreams import RandomStreams
+from theano.tensor.signal import downsample
+from theano.tensor.nnet import conv2d
 
+from LogisticRegression import LogisticRegression
 
-try:
-    import PIL.Image as Image
-except ImportError:
-    import Image
+class HiddenLayer:
+    def __init__(self, input, rng, n_in, n_out, W = None, b = None, activ = T.tanh):
 
-
-class dA(object):
-    """Denoising Auto-Encoder class (dA)
-    A denoising autoencoders tries to reconstruct the input from a corrupted
-    version of it by projecting it first in a latent space and reprojecting
-    it afterwards back in the input space. Please refer to Vincent et al.,2008
-    for more details. If x is the input then equation (1) computes a partially
-    destroyed version of x by means of a stochastic mapping q_D. Equation (2)
-    computes the projection of the input into the latent space. Equation (3)
-    computes the reconstruction of the input, while equation (4) computes the
-    reconstruction error.
-    .. math::
-        \tilde{x} ~ q_D(\tilde{x}|x)                                     (1)
-        y = s(W \tilde{x} + b)                                           (2)
-        x = s(W' y  + b')                                                (3)
-        L(x,z) = -sum_{k=1}^d [x_k \log z_k + (1-x_k) \log( 1-z_k)]      (4)
-    """
-
-    def __init__(
-        self,
-        numpy_rng,
-        theano_rng=None,
-        input=None,
-        n_visible=784,
-        n_hidden=500,
-        W=None,
-        bhid=None,
-        bvis=None
-    ):
-        """
-        Initialize the dA class by specifying the number of visible units (the
-        dimension d of the input ), the number of hidden units ( the dimension
-        d' of the latent or hidden space ) and the corruption level. The
-        constructor also receives symbolic variables for the input, weights and
-        bias. Such a symbolic variables are useful when, for example the input
-        is the result of some computations, or when weights are shared between
-        the dA and an MLP layer. When dealing with SdAs this always happens,
-        the dA on layer 2 gets as input the output of the dA on layer 1,
-        and the weights of the dA are used in the second stage of training
-        to construct an MLP.
-        :type numpy_rng: numpy.random.RandomState
-        :param numpy_rng: number random generator used to generate weights
-        :type theano_rng: theano.tensor.shared_randomstreams.RandomStreams
-        :param theano_rng: Theano random generator; if None is given one is
-                     generated based on a seed drawn from `rng`
-        :type input: theano.tensor.TensorType
-        :param input: a symbolic description of the input or None for
-                      standalone dA
-        :type n_visible: int
-        :param n_visible: number of visible units
-        :type n_hidden: int
-        :param n_hidden:  number of hidden units
-        :type W: theano.tensor.TensorType
-        :param W: Theano variable pointing to a set of weights that should be
-                  shared belong the dA and another architecture; if dA should
-                  be standalone set this to None
-        :type bhid: theano.tensor.TensorType
-        :param bhid: Theano variable pointing to a set of biases values (for
-                     hidden units) that should be shared belong dA and another
-                     architecture; if dA should be standalone set this to None
-        :type bvis: theano.tensor.TensorType
-        :param bvis: Theano variable pointing to a set of biases values (for
-                     visible units) that should be shared belong dA and another
-                     architecture; if dA should be standalone set this to None
-        """
-        self.n_visible = n_visible
-        self.n_hidden = n_hidden
-
-        # create a Theano random generator that gives symbolic random values
-        if not theano_rng:
-            theano_rng = RandomStreams(numpy_rng.randint(2 ** 30))
-
-        # note : W' was written as `W_prime` and b' as `b_prime`
         if not W:
-            # W is initialized with `initial_W` which is uniformely sampled
-            # from -4*sqrt(6./(n_visible+n_hidden)) and
-            # 4*sqrt(6./(n_hidden+n_visible))the output of uniform if
-            # converted using asarray to dtype
-            # theano.config.floatX so that the code is runable on GPU
             initial_W = numpy.asarray(
-                numpy_rng.uniform(
-                    low=-4 * numpy.sqrt(6. / (n_hidden + n_visible)),
-                    high=4 * numpy.sqrt(6. / (n_hidden + n_visible)),
-                    size=(n_visible, n_hidden)
+                rng.uniform(
+                    low = -numpy.sqrt(6. / (n_in + n_out)),
+                    high = numpy.sqrt(6. / (n_in + n_out)),
+                    size = (n_in, n_out)
                 ),
-                dtype=theano.config.floatX
+                dtype = theano.config.floatX
             )
-            W = theano.shared(value=initial_W, name='W', borrow=True)
+            if activ == theano.tensor.nnet.sigmoid:
+                initial_W *= 4
+            W = theano.shared(value = initial_W, name = 'W', borrow = True)
 
-        if not bvis:
-            bvis = theano.shared(
-                value=numpy.zeros(
-                    n_visible,
-                    dtype=theano.config.floatX
-                ),
-                borrow=True
-            )
-
-        if not bhid:
-            bhid = theano.shared(
-                value=numpy.zeros(
-                    n_hidden,
-                    dtype=theano.config.floatX
-                ),
-                name='b',
-                borrow=True
-            )
+        if not b:
+            initial_b = numpy.zeros((n_out,), dtype = theano.config.floatX)
+            b = theano.shared(value = initial_b, name = 'b', borrow = True)
 
         self.W = W
-        # b corresponds to the bias of the hidden
-        self.b = bhid
-        # b_prime corresponds to the bias of the visible
-        self.b_prime = bvis
-        # tied weights, therefore W_prime is W transpose
-        self.W_prime = self.W.T
-        self.theano_rng = theano_rng
-        # if no input is given, generate a variable representing the input
-        if input is None:
-            # we use a matrix because we expect a minibatch of several
-            # examples, each example being a row
-            self.x = T.dmatrix(name='input')
-        else:
-            self.x = input
+        self.b = b
 
-        self.params = [self.W, self.b, self.b_prime]
+        lin_output = T.dot(input, self.W) + self.b
+        self.output = (lin_output if activ is None else activ(lin_output))
 
-    def get_corrupted_input(self, input, corruption_level):
-        """This function keeps ``1-corruption_level`` entries of the inputs the
-        same and zero-out randomly selected subset of size ``coruption_level``
-        Note : first argument of theano.rng.binomial is the shape(size) of
-               random numbers that it should produce
-               second argument is the number of trials
-               third argument is the probability of success of any trial
-                this will produce an array of 0s and 1s where 1 has a
-                probability of 1 - ``corruption_level`` and 0 with
-                ``corruption_level``
-                The binomial function return int64 data type by
-                default.  int64 multiplicated by the input
-                type(floatX) always return float64.  To keep all data
-                in floatX when floatX is float32, we set the dtype of
-                the binomial to floatX. As in our case the value of
-                the binomial is always 0 or 1, this don't change the
-                result. This is needed to allow the gpu to work
-                correctly as it only support float32 for now.
+        self.params = [self.W, self.b]
+
+
+class LeNetConvPoolLayer(object):
+    """Pool Layer of a convolutional network """
+
+    def __init__(self, rng, input, filter_shape, image_shape, poolsize=(2, 2)):
         """
-        return self.theano_rng.binomial(size=input.shape, n=1,
-                                        p=1 - corruption_level,
-                                        dtype=theano.config.floatX) * input
-
-    def get_hidden_values(self, input):
-        """ Computes the values of the hidden layer """
-        return T.nnet.sigmoid(T.dot(input, self.W) + self.b)
-
-    def get_reconstructed_input(self, hidden):
-        """Computes the reconstructed input given the values of the
-        hidden layer
+        Allocate a LeNetConvPoolLayer with shared variable internal parameters.
+        :type rng: numpy.random.RandomState
+        :param rng: a random number generator used to initialize weights
+        :type input: theano.tensor.dtensor4
+        :param input: symbolic image tensor, of shape image_shape
+        :type filter_shape: tuple or list of length 4
+        :param filter_shape: (number of filters, num input feature maps,
+                              filter height, filter width)
+        :type image_shape: tuple or list of length 4
+        :param image_shape: (batch size, num input feature maps,
+                             image height, image width)
+        :type poolsize: tuple or list of length 2
+        :param poolsize: the downsampling (pooling) factor (#rows, #cols)
         """
-        return T.nnet.sigmoid(T.dot(hidden, self.W_prime) + self.b_prime)
 
-    def get_cost_updates(self, corruption_level, learning_rate):
-        """ This function computes the cost and the updates for one trainng
-        step of the dA """
+        assert image_shape[1] == filter_shape[1]
+        self.input = input
 
-        tilde_x = self.get_corrupted_input(self.x, corruption_level)
-        y = self.get_hidden_values(tilde_x)
-        z = self.get_reconstructed_input(y)
-        # note : we sum over the size of a datapoint; if we are using
-        #        minibatches, L will be a vector, with one entry per
-        #        example in minibatch
-        L = - T.sum(self.x * T.log(z) + (1 - self.x) * T.log(1 - z), axis=1)
-        # note : L is now a vector, where each element is the
-        #        cross-entropy cost of the reconstruction of the
-        #        corresponding example of the minibatch. We need to
-        #        compute the average of all these to get the cost of
-        #        the minibatch
-        cost = T.mean(L)
+        # there are "num input feature maps * filter height * filter width"
+        # inputs to each hidden unit
+        fan_in = numpy.prod(filter_shape[1:])
+        # each unit in the lower layer receives a gradient from:
+        # "num output feature maps * filter height * filter width" /
+        #   pooling size
+        fan_out = (filter_shape[0] * numpy.prod(filter_shape[2:]) //
+                   numpy.prod(poolsize))
+        # initialize weights with random weights
+        W_bound = numpy.sqrt(6. / (fan_in + fan_out))
+        self.W = theano.shared(
+            numpy.asarray(
+                rng.uniform(low=-W_bound, high=W_bound, size=filter_shape),
+                dtype=theano.config.floatX
+            ),
+            borrow=True
+        )
 
-        # compute the gradients of the cost of the `dA` with respect
-        # to its parameters
-        gparams = T.grad(cost, self.params)
-        # generate the list of updates
-        updates = [
-            (param, param - learning_rate * gparam)
-            for param, gparam in zip(self.params, gparams)
-        ]
+        # the bias is a 1D tensor -- one bias per output feature map
+        b_values = numpy.zeros((filter_shape[0],), dtype=theano.config.floatX)
+        self.b = theano.shared(value=b_values, borrow=True)
 
-        return (cost, updates)
+        # convolve input feature maps with filters
+        conv_out = conv2d(
+            input=input,
+            filters=self.W,
+            filter_shape=filter_shape,
+            image_shape=image_shape
+        )
 
-import cPickle as pickle
-import gzip
-import numpy as np
-from softMaxRegression import softMaxRegression
-from DenoiseAE import DenoiseAE
+        # downsample each feature map individually, using maxpooling
+        pooled_out = downsample.max_pool_2d(
+            input=conv_out,
+            ds=poolsize,
+            ignore_border=True
+        )
 
-from PIL import Image
+        # add the bias term. Since the bias is a vector (1D array), we first
+        # reshape it to a tensor of shape (1, n_filters, 1, 1). Each bias will
+        # thus be broadcasted across mini-batches and feature map
+        # width & height
+        self.output = T.tanh(pooled_out + self.b.dimshuffle('x', 0, 'x', 'x'))
 
-import theano
-from theano import tensor as T
-import timeit
-from theano.tensor.shared_randomstreams import RandomStreams
+        # store parameters of this layer
+        self.params = [self.W, self.b]
+
+        # keep track of model input
+        self.input = input
 
 def shared_dataset(data_xy, borrow = True):
     '''Function that loads the dataset into shared variables
@@ -223,9 +141,9 @@ def shared_dataset(data_xy, borrow = True):
         Theano to copy it into the GPU memory.
     '''
     data_x, data_y = data_xy    #y is label
-    shared_x = theano.shared(np.asarray(data_x, dtype = theano.config.floatX),
+    shared_x = theano.shared(numpy.asarray(data_x, dtype = theano.config.floatX),
                                         borrow = borrow)
-    shared_y = theano.shared(np.asarray(data_y, dtype = theano.config.floatX),
+    shared_y = theano.shared(numpy.asarray(data_y, dtype = theano.config.floatX),
                                         borrow = borrow)
                         #data on the GPU it has to be stored as floats
                         #during our computations we need them as ints(cast).
@@ -246,269 +164,229 @@ def load_data(dataset = 'mnist.pkl.gz'):
             (test_set_x, test_set_y)]
     return rval
 
-def scale_to_unit_interval(ndar, eps=1e-8):
-  """ Scales all values in the ndarray ndar to be between 0 and 1 """
-  ndar = ndar.copy()
-  ndar -= ndar.min()
-  ndar *= 1.0 / (ndar.max() + eps)
-  return ndar
-
-
-def tile_raster_images(X, img_shape, tile_shape, tile_spacing=(0, 0),
-                       scale_rows_to_unit_interval=True,
-                       output_pixel_vals=True):
-  """
-  Transform an array with one flattened image per row, into an array in
-  which images are reshaped and layed out like tiles on a floor.
-
-  This function is useful for visualizing datasets whose rows are images,
-  and also columns of matrices for transforming those rows
-  (such as the first layer of a neural net).
-
-  :type X: a 2-D ndarray or a tuple of 4 channels, elements of which can
-  be 2-D ndarrays or None;
-  :param X: a 2-D array in which every row is a flattened image.
-
-  :type img_shape: tuple; (height, width)
-  :param img_shape: the original shape of each image
-
-  :type tile_shape: tuple; (rows, cols)
-  :param tile_shape: the number of images to tile (rows, cols)
-
-  :param output_pixel_vals: if output should be pixel values (i.e. int8
-  values) or floats
-
-  :param scale_rows_to_unit_interval: if the values need to be scaled before
-  being plotted to [0,1] or not
-
-
-  :returns: array suitable for viewing as an image.
-  (See:`Image.fromarray`.)
-  :rtype: a 2-d array with same dtype as X.
-
-  """
-
-  assert len(img_shape) == 2
-  assert len(tile_shape) == 2
-  assert len(tile_spacing) == 2
-
-  # The expression below can be re-written in a more C style as
-  # follows :
-  #
-  # out_shape = [0,0]
-  # out_shape[0] = (img_shape[0] + tile_spacing[0]) * tile_shape[0] -
-  #                tile_spacing[0]
-  # out_shape[1] = (img_shape[1] + tile_spacing[1]) * tile_shape[1] -
-  #                tile_spacing[1]
-  out_shape = [(ishp + tsp) * tshp - tsp for ishp, tshp, tsp
-                      in zip(img_shape, tile_shape, tile_spacing)]
-
-  if isinstance(X, tuple):
-      assert len(X) == 4
-      # Create an output numpy ndarray to store the image
-      if output_pixel_vals:
-          out_array = np.zeros((out_shape[0], out_shape[1], 4), dtype='uint8')
-      else:
-          out_array = np.zeros((out_shape[0], out_shape[1], 4), dtype=X.dtype)
-
-      #colors default to 0, alpha defaults to 1 (opaque)
-      if output_pixel_vals:
-          channel_defaults = [0, 0, 0, 255]
-      else:
-          channel_defaults = [0., 0., 0., 1.]
-
-      for i in range(4):
-          if X[i] is None:
-              # if channel is None, fill it with zeros of the correct
-              # dtype
-              out_array[:, :, i] = np.zeros(out_shape,
-                      dtype='uint8' if output_pixel_vals else out_array.dtype
-                      ) + channel_defaults[i]
-          else:
-              # use a recurrent call to compute the channel and store it
-              # in the output
-              out_array[:, :, i] = tile_raster_images(X[i], img_shape, tile_shape, tile_spacing, scale_rows_to_unit_interval, output_pixel_vals)
-      return out_array
-
-  else:
-      # if we are dealing with only one channel
-      H, W = img_shape
-      Hs, Ws = tile_spacing
-
-      # generate a matrix to store the output
-      out_array = np.zeros(out_shape, dtype='uint8' if output_pixel_vals else X.dtype)
-
-
-      for tile_row in range(tile_shape[0]):
-          for tile_col in range(tile_shape[1]):
-              if tile_row * tile_shape[1] + tile_col < X.shape[0]:
-                  if scale_rows_to_unit_interval:
-                      # if we should scale values to be between 0 and 1
-                      # do this by calling the `scale_to_unit_interval`
-                      # function
-                      this_img = scale_to_unit_interval(X[tile_row * tile_shape[1] + tile_col].reshape(img_shape))
-                  else:
-                      this_img = X[tile_row * tile_shape[1] + tile_col].reshape(img_shape)
-                  # add the slice to the corresponding position in the
-                  # output array
-                  out_array[
-                      tile_row * (H+Hs): tile_row * (H + Hs) + H,
-                      tile_col * (W+Ws): tile_col * (W + Ws) + W
-                      ] \
-                      = this_img * (255 if output_pixel_vals else 1)
-      return out_array
-
-
-def test_dA(learning_rate=0.1, training_epochs=5,
-            dataset='mnist.pkl.gz',
-            batch_size=20, output_folder='dA_plots'):
-
-    """
-    This demo is tested on MNIST
+def evaluate_lenet5(learning_rate=0.1, n_epochs=200,
+                    dataset='mnist.pkl.gz',
+                    nkerns=[20, 50], batch_size=500):
+    """ Demonstrates lenet on MNIST dataset
     :type learning_rate: float
-    :param learning_rate: learning rate used for training the DeNosing
-                          AutoEncoder
-    :type training_epochs: int
-    :param training_epochs: number of epochs used for training
+    :param learning_rate: learning rate used (factor for the stochastic
+                          gradient)
+    :type n_epochs: int
+    :param n_epochs: maximal number of epochs to run the optimizer
     :type dataset: string
-    :param dataset: path to the picked dataset
+    :param dataset: path to the dataset used for training /testing (MNIST here)
+    :type nkerns: list of ints
+    :param nkerns: number of kernels on each layer
     """
+
+    rng = numpy.random.RandomState(23455)
+
     datasets = load_data(dataset)
+
     train_set_x, train_set_y = datasets[0]
+    valid_set_x, valid_set_y = datasets[1]
+    test_set_x, test_set_y = datasets[2]
 
     # compute number of minibatches for training, validation and testing
-    n_train_batches = train_set_x.get_value(borrow=True).shape[0] // batch_size
+    n_train_batches = train_set_x.get_value(borrow=True).shape[0]
+    n_valid_batches = valid_set_x.get_value(borrow=True).shape[0]
+    n_test_batches = test_set_x.get_value(borrow=True).shape[0]
+    n_train_batches //= batch_size
+    n_valid_batches //= batch_size
+    n_test_batches //= batch_size
 
-    # start-snippet-2
     # allocate symbolic variables for the data
-    index = T.lscalar()    # index to a [mini]batch
-    x = T.matrix('x')  # the data is presented as rasterized images
-    # end-snippet-2
+    index = T.lscalar()  # index to a [mini]batch
 
-    if not os.path.isdir(output_folder):
-        os.makedirs(output_folder)
-    os.chdir(output_folder)
+    # start-snippet-1
+    x = T.matrix('x')   # the data is presented as rasterized images
+    y = T.ivector('y')  # the labels are presented as 1D vector of
+                        # [int] labels
 
-    ####################################
-    # BUILDING THE MODEL NO CORRUPTION #
-    ####################################
+    ######################
+    # BUILD ACTUAL MODEL #
+    ######################
+    print('... building the model')
 
-    rng = numpy.random.RandomState(123)
-    theano_rng = RandomStreams(rng.randint(2 ** 30))
+    # Reshape matrix of rasterized images of shape (batch_size, 28 * 28)
+    # to a 4D tensor, compatible with our LeNetConvPoolLayer
+    # (28, 28) is the size of MNIST images.
+    layer0_input = x.reshape((batch_size, 1, 28, 28))
 
-    da = dA(
-        numpy_rng=rng,
-        theano_rng=theano_rng,
-        input=x,
-        n_visible=28 * 28,
-        n_hidden=500
+    # Construct the first convolutional pooling layer:
+    # filtering reduces the image size to (28-5+1 , 28-5+1) = (24, 24)
+    # maxpooling reduces this further to (24/2, 24/2) = (12, 12)
+    # 4D output tensor is thus of shape (batch_size, nkerns[0], 12, 12)
+    layer0 = LeNetConvPoolLayer(
+        rng,
+        input=layer0_input,
+        image_shape=(batch_size, 1, 28, 28),
+        filter_shape=(nkerns[0], 1, 5, 5),
+        poolsize=(2, 2)
     )
 
-    cost, updates = da.get_cost_updates(
-        corruption_level=0.,
-        learning_rate=learning_rate
+    # Construct the second convolutional pooling layer
+    # filtering reduces the image size to (12-5+1, 12-5+1) = (8, 8)
+    # maxpooling reduces this further to (8/2, 8/2) = (4, 4)
+    # 4D output tensor is thus of shape (batch_size, nkerns[1], 4, 4)
+    layer1 = LeNetConvPoolLayer(
+        rng,
+        input=layer0.output,
+        image_shape=(batch_size, nkerns[0], 12, 12),
+        filter_shape=(nkerns[1], nkerns[0], 5, 5),
+        poolsize=(2, 2)
     )
 
-    train_da = theano.function(
+    # the HiddenLayer being fully-connected, it operates on 2D matrices of
+    # shape (batch_size, num_pixels) (i.e matrix of rasterized images).
+    # This will generate a matrix of shape (batch_size, nkerns[1] * 4 * 4),
+    # or (500, 50 * 4 * 4) = (500, 800) with the default values.
+    layer2_input = layer1.output.flatten(2)
+
+    # construct a fully-connected sigmoidal layer
+    layer2 = HiddenLayer(
+        input=layer2_input,
+        rng = rng,
+        n_in=nkerns[1] * 4 * 4,
+        n_out=500,
+        activ=T.tanh
+    )
+
+    # classify the values of the fully-connected sigmoidal layer
+    layer3 = LogisticRegression(input=layer2.output, n_in=500, n_out=10)
+
+    # the cost we minimize during training is the NLL of the model
+    cost = layer3.negative_log_likelihood(y)
+
+    # create a function to compute the mistakes that are made by the model
+    test_model = theano.function(
+        [index],
+        layer3.errors(y),
+        givens={
+            x: test_set_x[index * batch_size: (index + 1) * batch_size],
+            y: test_set_y[index * batch_size: (index + 1) * batch_size]
+        }
+    )
+
+    validate_model = theano.function(
+        [index],
+        layer3.errors(y),
+        givens={
+            x: valid_set_x[index * batch_size: (index + 1) * batch_size],
+            y: valid_set_y[index * batch_size: (index + 1) * batch_size]
+        }
+    )
+
+    # create a list of all model parameters to be fit by gradient descent
+    params = layer3.params + layer2.params + layer1.params + layer0.params
+
+    # create a list of gradients for all model parameters
+    grads = T.grad(cost, params)
+
+    # train_model is a function that updates the model parameters by
+    # SGD Since this model has many parameters, it would be tedious to
+    # manually create an update rule for each model parameter. We thus
+    # create the updates list by automatically looping over all
+    # (params[i], grads[i]) pairs.
+    updates = [
+        (param_i, param_i - learning_rate * grad_i)
+        for param_i, grad_i in zip(params, grads)
+    ]
+
+    train_model = theano.function(
         [index],
         cost,
         updates=updates,
         givens={
-            x: train_set_x[index * batch_size: (index + 1) * batch_size]
+            x: train_set_x[index * batch_size: (index + 1) * batch_size],
+            y: train_set_y[index * batch_size: (index + 1) * batch_size]
         }
     )
+    # end-snippet-1
 
+    ###############
+    # TRAIN MODEL #
+    ###############
+    print('... training')
+    # early-stopping parameters
+    patience = 10000  # look as this many examples regardless
+    patience_increase = 2  # wait this much longer when a new best is
+                           # found
+    improvement_threshold = 0.995  # a relative improvement of this much is
+                                   # considered significant
+    validation_frequency = min(n_train_batches, patience // 2)
+                                  # go through this many
+                                  # minibatche before checking the network
+                                  # on the validation set; in this case we
+                                  # check every epoch
+
+    best_validation_loss = numpy.inf
+    best_iter = 0
+    test_score = 0.
     start_time = timeit.default_timer()
 
-    ############
-    # TRAINING #
-    ############
+    epoch = 0
+    done_looping = False
 
-    # go through training epochs
-    for epoch in range(training_epochs):
-        # go through trainng set
-        c = []
-        for batch_index in range(n_train_batches):
-            c.append(train_da(batch_index))
+    while (epoch < n_epochs) and (not done_looping):
+        epoch = epoch + 1
+        for minibatch_index in range(n_train_batches):
 
-        print('Training epoch %d, cost ' % epoch, numpy.mean(c))
+            iter = (epoch - 1) * n_train_batches + minibatch_index
 
-    end_time = timeit.default_timer()
+            if iter % 100 == 0:
+                print('training @ iter = ', iter)
+            cost_ij = train_model(minibatch_index)
 
-    training_time = (end_time - start_time)
+            if (iter + 1) % validation_frequency == 0:
 
-    print(('The no corruption code for file ' +
-           os.path.split(__file__)[1] +
-           ' ran for %.2fm' % ((training_time) / 60.)))
-    image = Image.fromarray(
-        tile_raster_images(X=da.W.get_value(borrow=True).T,
-                           img_shape=(28, 28), tile_shape=(10, 10),
-                           tile_spacing=(1, 1)))
-    #image.save('filters_corruption_0.png')
+                # compute zero-one loss on validation set
+                validation_losses = [validate_model(i) for i
+                                     in range(n_valid_batches)]
+                this_validation_loss = numpy.mean(validation_losses)
+                print('epoch %i, minibatch %i/%i, validation error %f %%' %
+                      (epoch, minibatch_index + 1, n_train_batches,
+                       this_validation_loss * 100.))
 
-    # start-snippet-3
-    #####################################
-    # BUILDING THE MODEL CORRUPTION 30% #
-    #####################################
+                # if we got the best validation score until now
+                if this_validation_loss < best_validation_loss:
 
-    rng = numpy.random.RandomState(123)
-    theano_rng = RandomStreams(rng.randint(2 ** 30))
+                    #improve patience if loss improvement is good enough
+                    if this_validation_loss < best_validation_loss *  \
+                       improvement_threshold:
+                        patience = max(patience, iter * patience_increase)
 
-    da = dA(
-        numpy_rng=rng,
-        theano_rng=theano_rng,
-        input=x,
-        n_visible=28 * 28,
-        n_hidden=500
-    )
+                    # save best validation score and iteration number
+                    best_validation_loss = this_validation_loss
+                    best_iter = iter
 
-    cost, updates = da.get_cost_updates(
-        corruption_level=0.3,
-        learning_rate=learning_rate
-    )
+                    # test it on the test set
+                    test_losses = [
+                        test_model(i)
+                        for i in range(n_test_batches)
+                    ]
+                    test_score = numpy.mean(test_losses)
+                    print(('     epoch %i, minibatch %i/%i, test error of '
+                           'best model %f %%') %
+                          (epoch, minibatch_index + 1, n_train_batches,
+                           test_score * 100.))
 
-    train_da = theano.function(
-        [index],
-        cost,
-        updates=updates,
-        givens={
-            x: train_set_x[index * batch_size: (index + 1) * batch_size]
-        }
-    )
-
-    start_time = timeit.default_timer()
-
-    ############
-    # TRAINING #
-    ############
-
-    # go through training epochs
-    for epoch in range(training_epochs):
-        # go through trainng set
-        c = []
-        for batch_index in range(n_train_batches):
-            c.append(train_da(batch_index))
-
-        print('Training epoch %d, cost ' % epoch, numpy.mean(c))
+            if patience <= iter:
+                done_looping = True
+                break
 
     end_time = timeit.default_timer()
-
-    training_time = (end_time - start_time)
-
-    print(('The 30% corruption code for file ' +
+    print('Optimization complete.')
+    print('Best validation score of %f %% obtained at iteration %i, '
+          'with test performance %f %%' %
+          (best_validation_loss * 100., best_iter + 1, test_score * 100.))
+    print('The code for file ' +
            os.path.split(__file__)[1] +
-           ' ran for %.2fm' % (training_time / 60.)))
-    # end-snippet-3
+           ' ran for %.2fm' % ((end_time - start_time) / 60.))
 
-    # start-snippet-4
-    image = Image.fromarray(tile_raster_images(
-        X=da.W.get_value(borrow=True).T,
-        img_shape=(28, 28), tile_shape=(10, 10),
-        tile_spacing=(1, 1)))
-    #image.save('filters_corruption_30.png')
-    # end-snippet-4
-
-    os.chdir('../')
+if __name__ == '__main__':
+    evaluate_lenet5()
 
 
-    test_dA()
+def experiment(state, channel):
+    evaluate_lenet5(state.learning_rate, dataset=state.dataset)
